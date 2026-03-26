@@ -1,0 +1,482 @@
+// ============================================================================
+// AI 互动直播房间 MVP 数据库模型 V1.2
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// 枚举类型
+// ============================================================================
+
+enum AccountType {
+  human
+  ai
+  admin
+}
+
+enum HumanRole {
+  viewer
+  operator
+}
+
+enum AccountStatus {
+  active
+  banned
+  deleted
+}
+
+enum MessageType {
+  text
+  system
+  ai_reply
+  welcome
+}
+
+enum AuditResult {
+  pass
+  warn
+  block
+}
+
+enum LiveSessionStatus {
+  live
+  ended
+  interrupted
+}
+
+enum ViolationType {
+  spam
+  harassment
+  sensitive
+  other
+}
+
+enum ViolationSeverity {
+  low
+  medium
+  high
+}
+
+enum ViolationStatus {
+  pending
+  resolved
+  ignored
+}
+
+enum SensitiveLevel {
+  warn
+  block
+}
+
+// ============================================================================
+// 统一账号主体表
+// ============================================================================
+
+model Account {
+  id           String        @id @default(uuid())
+  accountType  AccountType   @default(human)
+  humanRole    HumanRole?    @default(viewer)
+  username     String        @unique
+  email        String?       @unique
+  passwordHash String?
+  status       AccountStatus @default(active)
+  lastLoginAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // 扩展信息
+  humanProfile   HumanProfile?
+  aiProfile      AiProfile?
+  adminProfile   AdminProfile?
+  operator       Operator?
+
+  // 消息发送
+  sentMessages Message[] @relation("SentMessages")
+
+  // 关注关系（作为关注者）
+  followsAsFollower Follow[] @relation("FollowerAccount")
+
+  // 关注关系（作为被关注者）
+  followsAsFollowing Follow[] @relation("FollowingAccount")
+
+  // 观看历史（仅登录用户）
+  watchHistory WatchHistory[]
+
+  // 违规记录
+  violations UserViolation[]
+
+  // 敏感词创建者
+  createdSensitiveWords SensitiveWord[]
+
+  // 审核日志（作为操作人）
+  moderationLogsAsOperator ModerationLog[] @relation("OperatorAccount")
+
+  // 审核日志（作为被处理者）
+  moderationLogsAsTarget ModerationLog[] @relation("TargetAccount")
+
+  // 房间参与（仅登录用户）
+  roomParticipants RoomParticipant[]
+
+  @@index([accountType])
+  @@index([status])
+  @@index([username])
+}
+
+// ============================================================================
+// 人类用户扩展信息
+// ============================================================================
+
+model HumanProfile {
+  id        String   @id @default(uuid())
+  accountId String   @unique
+  avatar    String?
+  bio       String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// AI 主播扩展信息
+// ============================================================================
+
+model AiProfile {
+  id            String   @id @default(uuid())
+  accountId     String   @unique
+  name          String
+  avatar        String?
+  bio           String?
+  persona       String
+  style         String?
+  tags          String[]
+  welcomeMsg    String?
+  forbidTopics  String[]
+  customPrompt  String?
+  isOnline      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account           Account            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  room             Room?
+  liveSessions     LiveSession[]
+  openclawBinding OpenClawBinding?
+
+  @@index([isOnline])
+}
+
+// ============================================================================
+// 管理员扩展信息
+// ============================================================================
+
+model AdminProfile {
+  id          String   @id @default(uuid())
+  accountId   String   @unique
+  permissions String[]
+  createdAt   DateTime @default(now())
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// 直播间（固定，每个 AI 一个固定房间）
+// ============================================================================
+
+model Room {
+  id           String   @id @default(uuid())
+  aiProfileId  String   @unique
+  title        String?
+  category     String?
+  coverImage   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  aiProfile   AiProfile        @relation(fields: [aiProfileId], references: [id], onDelete: Cascade)
+  liveSessions LiveSession[]
+  messages    Message[]
+  watchHistory WatchHistory[]
+  participants RoomParticipant[]
+
+  @@index([category])
+}
+
+// ============================================================================
+// 直播场次（每次开播的记录）
+// ============================================================================
+
+model LiveSession {
+  id            String            @id @default(uuid())
+  roomId        String
+  aiProfileId   String
+  title         String
+  startedAt     DateTime          @default(now())
+  endedAt       DateTime?
+  status        LiveSessionStatus @default(live)
+  peakViewers   Int               @default(0)
+  totalMessages Int               @default(0)
+  createdAt     DateTime          @default(now())
+
+  room         Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  aiProfile    AiProfile     @relation(fields: [aiProfileId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  watchHistory WatchHistory[]
+
+  @@index([roomId])
+  @@index([aiProfileId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+// 注意：同一 room 同时只能有一个 live 状态的场次
+// 约束通过业务逻辑实现
+
+// ============================================================================
+// 直播间参与者（仅记录已登录用户的当前在线状态）
+// ============================================================================
+
+model RoomParticipant {
+  id        String   @id @default(uuid())
+  roomId    String
+  accountId String
+  joinedAt  DateTime @default(now())
+
+  room    Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, accountId])
+  @@index([roomId])
+  @@index([accountId])
+}
+
+// ============================================================================
+// 消息统一表
+// ============================================================================
+
+model Message {
+  id               String       @id @default(uuid())
+  roomId           String
+  liveSessionId    String?
+  senderAccountId  String
+  content          String
+  type             MessageType  @default(text)
+  metadata         Json?
+  isAudited        Boolean      @default(true)
+  auditResult      AuditResult?
+  createdAt        DateTime     @default(now())
+
+  room         Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  liveSession  LiveSession?  @relation(fields: [liveSessionId], references: [id])
+  sender       Account       @relation("SentMessages", fields: [senderAccountId], references: [id], onDelete: Cascade)
+
+  // 违规记录关联
+  violations UserViolation[]
+
+  // 审核日志关联
+  moderationLogs ModerationLog[]
+
+  @@index([roomId])
+  @@index([liveSessionId])
+  @@index([senderAccountId])
+  @@index([createdAt(sort: Desc)])
+  @@index([type])
+}
+
+// ============================================================================
+// 关注关系表
+// ============================================================================
+
+model Follow {
+  id                 String   @id @default(uuid())
+  followerAccountId  String   // 关注者
+  followingAccountId String   // 被关注者
+  createdAt          DateTime @default(now())
+
+  follower  Account @relation("FollowerAccount", fields: [followerAccountId], references: [id], onDelete: Cascade)
+  following Account @relation("FollowingAccount", fields: [followingAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([followerAccountId, followingAccountId])
+  @@index([followerAccountId])
+  @@index([followingAccountId])
+}
+
+// ============================================================================
+// 用户观看历史（仅登录用户）
+// ============================================================================
+
+model WatchHistory {
+  id            String    @id @default(uuid())
+  accountId     String
+  roomId        String
+  liveSessionId String?
+  createdAt     DateTime  @default(now())
+
+  account     Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  room        Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  liveSession LiveSession? @relation(fields: [liveSessionId], references: [id])
+
+  @@index([accountId])
+  @@index([roomId])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================================================
+// 敏感词表
+// ============================================================================
+
+model SensitiveWord {
+  id          String         @id @default(uuid())
+  word        String         @unique
+  level       SensitiveLevel @default(warn)
+  replacement String?
+  createdById String?
+  createdAt   DateTime       @default(now())
+
+  createdBy Account? @relation(fields: [createdById], references: [id])
+
+  @@index([level])
+}
+
+// ============================================================================
+// 审核日志表
+// ============================================================================
+
+model ModerationLog {
+  id               String    @id @default(uuid())
+  targetAccountId  String?
+  targetMessageId  String?
+  action           String
+  reason           String?
+  operatorType     String    // system / admin
+  operatorId       String?
+  createdAt        DateTime  @default(now())
+
+  targetAccount Account? @relation("TargetAccount", fields: [targetAccountId], references: [id])
+  targetMessage Message? @relation(fields: [targetMessageId], references: [id])
+  operator     Account?  @relation("OperatorAccount", fields: [operatorId], references: [id])
+
+  @@index([targetAccountId])
+  @@index([targetMessageId])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================================================
+// 用户违规记录
+// ============================================================================
+
+model UserViolation {
+  id            String             @id @default(uuid())
+  accountId     String
+  violationType ViolationType
+  severity      ViolationSeverity  @default(low)
+  messageId     String?
+  description   String?
+  status        ViolationStatus    @default(pending)
+  createdAt     DateTime           @default(now())
+  resolvedAt    DateTime?
+
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  message  Message? @relation(fields: [messageId], references: [id])
+
+  @@index([accountId])
+  @@index([violationType])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================================================
+// 主理人 (Operator)
+// ============================================================================
+
+enum OperatorStatus {
+  pending
+  approved
+  rejected
+}
+
+model Operator {
+  id          String         @id @default(uuid())
+  accountId   String         @unique
+  name        String
+  email       String
+  status      OperatorStatus @default(pending)
+  verifiedAt  DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  account   Account            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  bindings  OpenClawBinding[]
+
+  @@index([status])
+}
+
+// ============================================================================
+// OpenClaw AI 绑定关系
+// ============================================================================
+
+enum BindingStatus {
+  pending
+  approved
+  rejected
+}
+
+enum VerificationMethod {
+  manual
+  token
+}
+
+enum OpenClawAuthType {
+  none
+  token
+  apiKey
+}
+
+model OpenClawBinding {
+  id                  String             @id @default(uuid())
+  operatorId          String
+  aiProfileId         String             @unique
+  openclawId          String
+  openclawName        String
+  openclawEndpoint    String?            // OpenClaw 实例地址 (下沉到 binding 级别)
+  authType            OpenClawAuthType  @default(none)
+  authTokenHash       String?           // 认证 token 哈希
+  webhookSecret       String?           // Webhook 验证密钥
+  verificationMethod  VerificationMethod @default(manual)
+  status              BindingStatus     @default(pending)
+  approvedBy          String?
+  approvedAt          DateTime?
+  rejectedReason      String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  operator        Operator             @relation(fields: [operatorId], references: [id])
+  aiProfile       AiProfile           @relation(fields: [aiProfileId], references: [id], onDelete: Cascade)
+  qualification   BroadcastQualification?
+
+  @@index([operatorId])
+  @@index([status])
+  @@index([openclawId])
+}
+
+// ============================================================================
+// 开播资格
+// ============================================================================
+
+model BroadcastQualification {
+  id          String    @id @default(uuid())
+  bindingId   String    @unique
+  isAllowed   Boolean   @default(false)
+  allowedAt   DateTime?
+  revokedAt   DateTime?
+  reason      String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  binding OpenClawBinding @relation(fields: [bindingId], references: [id])
+}
